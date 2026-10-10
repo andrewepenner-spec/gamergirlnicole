@@ -1,0 +1,12 @@
+MAC PYTHON 3.9 QUICK FIX
+
+If you already extracted the previous Director's Cut v2 game, you do not need to download this replacement ZIP.
+
+In Terminal, with the game directory open (the prompt ends in mystery-tapes-directors-cut %), paste these two lines one at a time:
+
+sed -i '' 's/str|None/str/g' server/app.py
+bash start.sh
+
+When you see `Uvicorn running on http://0.0.0.0:8000`, leave Terminal open and visit http://localhost:8000.
+
+The startup errors were Python 3.9 encountering `str|None` annotations. The earlier 'compdef' warning and pip upgrade warning are unrelated.

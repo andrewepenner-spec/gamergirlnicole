@@ -1,0 +1,10 @@
+services:
+  manor-mystery:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      MYSTERY_DB: /app/data/game.sqlite3
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
