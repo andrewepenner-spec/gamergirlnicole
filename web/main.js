@@ -2,7 +2,7 @@
 'use strict';
 const $=s=>document.querySelector(s);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state={catalog:null,room:null,session:JSON.parse(localStorage.getItem('mystery.session')||'null'),screen:'auto',selectedCard:null,chosenChapter:'will',casePick:'will-1',busy:false,ws:null,clock:0,privateVisible:true,help:false};
+const state={catalog:null,room:null,session:JSON.parse(localStorage.getItem('mystery.session')||'null'),screen:'auto',selectedCard:null,chosenChapter:'will',casePick:'will-1',busy:false,ws:null,clock:0,privateVisible:true,help:false,pendingRoomRender:false};
 const people=()=>state.catalog?.people||[];const roomList=()=>state.catalog?.rooms||[];const weapons=()=>state.catalog?.weapons||[];
 const named=(type,id)=>{const source=type==='person'?people():type==='room'?roomList():weapons();return source.find(x=>x.id===id)?.name||id||'—'};
 const self=()=>state.room?.roster?.find(x=>x.is_self);
@@ -18,21 +18,61 @@ function toast(text,bad=false){const node=$('#toast');node.textContent=text;node
 function saveSession(session){state.session=session;localStorage.setItem('mystery.session',JSON.stringify(session));}
 async function api(path,opt={}){const headers={'Content-Type':'application/json'};if(state.session?.token)headers['X-Player-Token']=state.session.token;
  const r=await fetch(path,{...opt,headers:{...headers,...opt.headers}});let data=await r.json().catch(()=>({}));if(!r.ok)throw new Error(data.detail||`Request failed (${r.status})`);return data;}
-async function fetchRoom(render=true){if(!state.session)return;try{const old=state.room;const r=await api('/api/rooms/'+state.session.code);state.room=r;
- if(old && old.phase!==r.phase){state.screen='auto';state.selectedCard=null}
- if(render)renderApp();}catch(err){if(/Invalid|No room/.test(err.message)){state.session=null;state.room=null;localStorage.removeItem('mystery.session');renderApp()}else console.warn(err)}}
+// Preserve the DOM between polls: a room revision changes only after an actual game command.
+// This avoids blanking/reloading scene images, resetting scroll, and flickering every 2.5s.
+function acceptRoomUpdate(next,render=true){
+ const old=state.room;
+ if(old && next.revision<old.revision)return false; // Ignore a stale GET racing a command.
+ if(old && next.revision===old.revision && next.code===old.code && next.me===old.me)return false;
+ state.room=next;
+ if(old && (old.phase!==next.phase || old.case?.id!==next.case?.id)){state.screen='auto';state.selectedCard=null}
+ if(render){
+  if(isEditing()){state.pendingRoomRender=true;} // Never remove a focused input mid-edit.
+  else refreshVisibleRoom(old,next);
+ }else state.pendingRoomRender=true;
+ return true;
+}
+async function fetchRoom(render=true){
+ if(!state.session)return;
+ const session=state.session;
+ try{
+  const next=await api('/api/rooms/'+session.code);
+  if(state.session!==session)return; // An old request must not restore a room we left.
+  acceptRoomUpdate(next,render);
+ }catch(err){
+  if(state.session!==session)return;
+  if(/Invalid|No room/.test(err.message)){state.session=null;state.room=null;state.pendingRoomRender=false;localStorage.removeItem('mystery.session');renderApp()}
+  else console.warn(err);
+ }
+}
 async function cmd(type,data={}){if(state.busy)return;state.busy=true;
  try{const r=await api(`/api/rooms/${state.session.code}/command`,{method:'POST',body:JSON.stringify({type,data})});const old=state.room;state.room=r;
  if(!old||old.phase!==r.phase){state.screen='auto';state.selectedCard=null}
  if(type==='save')toast('Private notebook saved.');else if(type==='start')toast('The mystery has begun.');
- renderApp();}catch(err){toast(err.message,true);}finally{state.busy=false}}
+ refreshVisibleRoom(old,r);}catch(err){toast(err.message,true);}finally{state.busy=false}}
 function connectWebsocket(){if(!state.session)return;try{state.ws?.close();const proto=location.protocol==='https:'?'wss':'ws';const ws=new WebSocket(`${proto}://${location.host}/api/ws/${state.session.code}?token=${encodeURIComponent(state.session.token)}`);state.ws=ws;
- ws.onmessage=ev=>{try{const msg=JSON.parse(ev.data);if(msg.revision> (state.room?.revision||0))fetchRoom(!isEditing())}catch{}};
+ ws.onmessage=ev=>{try{const msg=JSON.parse(ev.data);if(msg.revision> (state.room?.revision||0))fetchRoom()}catch{}};
  ws.onerror=()=>{};ws.onclose=()=>{};}catch{}}
 function isEditing(){return document.activeElement?.matches?.('input, textarea, select')}
 function currentScreen(){if(state.screen!=='auto')return state.screen;
  if(!state.room)return 'home';return {LOBBY:'lobby',IDENTITY:'identity',READY:'film',WATCHING:'film',DISCLOSURE:'identity',DECISION:'decision',TURN:'cards',CHALLENGE:'accuse',ENDED:'results'}[state.room.phase]||'home'}
-function renderApp(){const screen=currentScreen(),room=state.room,host=room?.is_host;
+// Live observation answers change the room revision, but the film itself is unchanged.
+// Update just the score/challenge widgets and keep the cinematic DOM node mounted.
+function refreshVisibleRoom(previous,next){
+ if(previous && previous.phase==='WATCHING' && next.phase==='WATCHING' &&
+    previous.case?.id===next.case?.id && previous.scene?.index===next.scene?.index &&
+    currentScreen()==='film' && document.getElementById('film-view')){
+  const existingChallenge=document.querySelector('.scene-challenge');
+  if(existingChallenge)existingChallenge.outerHTML=sceneChallenge(next);
+  const existingBar=document.querySelector('.content > .director-bar');
+  if(existingBar)existingBar.outerHTML=directorBar(next);
+  state.pendingRoomRender=false;
+  tickFilm();
+  return;
+ }
+ renderApp();
+}
+function renderApp(){state.pendingRoomRender=false;const screen=currentScreen(),room=state.room,host=room?.is_host;
  const name=self()?.name||'Guest';const heading=room?`${chapter(room.case.chapter)?.title||'The manor'} / ${phaseName(room.phase)}`:'THE MANOR FILES  /  INTERACTIVE MYSTERY';
  $('#app').innerHTML=`<div class="app"><aside class="sidebar"><div class="brand"><div class="main">Mystery<br/>Tapes</div><div class="sub">THE MANOR FILES</div><div class="caption">A VIDEO DEDUCTION GAME</div></div>
  <nav class="nav" aria-label="Main navigation">${navItems.map(([id,ico,label])=>`<button class="${screen===id?'active':''}" data-nav="${id}"><span>${ico}</span>${label}</button>`).join('')}</nav>
@@ -73,9 +113,13 @@ function renderFilm(){const r=state.room,c=r.case,scene=r.scene,waiting=r.phase=
  <div><div class="paper"><div class="eyebrow">OBSERVATIONAL EVIDENCE</div><h3>The details matter</h3>${r.phase==='WATCHING'?`<p>The following evidence unlocks when the host completes the scene. Observe the video and draw your own conclusions.</p><p class="muted">Characters, possessions, room features and forensic traces all relate to the numbered case clues.</p>`:scene.observations.map(x=>`<div class="scene-observation">${esc(x)}</div>`).join('')}
  <div class="divider"></div><div class="eyebrow">CASE RECORD</div><p>${c.murder_count} death${c.murder_count===1?'':'s'} must be solved. Each solution links a murderer, victim, room and weapon.</p><div class="timeline">${Array.from({length:5},(_,i)=>`<span class="timeline-item ${i<=scene.index?'active':''}">${i+1}</span>`).join('')}</div><div class="divider"></div>${r.enhanced?`<div class="notice">Director’s Cut: watch for the scene observation challenge, then use your specialty or vote at the crossroads.</div>`:''}<h3>At the intermission</h3><p>Every detective privately chooses one truthful fact about their own identity to reveal to the table. Then each detective gets an investigation turn.</p>${r.phase==='DISCLOSURE'?'<button class="btn btn-primary btn-block" data-nav="identity">Reveal your personal fact →</button>':''}${r.phase==='DECISION'?'<button class="btn btn-gold btn-block" data-nav="decision">Vote on the next lead →</button>':''}${r.phase==='TURN'?'<button class="btn btn-primary btn-block" data-nav="cards">Go to the action round →</button>':''}${r.phase==='READY'&&!r.is_host?'<div class="notice">Waiting for host to play the next scene.</div>':''}</div></div></div></section>`}
 function tickFilm(){const r=state.room;if(!r||r.phase!=='WATCHING'||!r.scene)return;const duration=42,elapsed=Math.max(0,Math.min(duration,Date.now()/1000-r.scene_started));const scene=r.scene;
- const line=$('#film-line');if(line)line.textContent=scene.lines[Math.min(2,Math.floor(elapsed/14))];const prog=$('#film-progress');if(prog)prog.style.width=`${elapsed/duration*100}%`;
- const badge=$('#vhs-badge');if(badge)badge.textContent=`▶ PLAY  •  00:${String(Math.floor(elapsed)).padStart(2,'0')} / 00:42`;
- const flash=$('#film-flash');if(flash){const idx=scene.index;const cue=idx%3===0?scene.observations[0]:idx%3===1?scene.observations[2]:scene.observations[3];flash.textContent=elapsed>=8&&elapsed<=25?'✦ OBSERVED DETAIL  /  '+cue:'';flash.classList.toggle('visible',elapsed>=8&&elapsed<=25)}}
+ const line=$('#film-line'),caption=scene.lines[Math.min(2,Math.floor(elapsed/14))];if(line&&line.textContent!==caption)line.textContent=caption;
+ const prog=$('#film-progress');if(prog)prog.style.width=`${elapsed/duration*100}%`;
+ const badge=$('#vhs-badge'),badgeText=`▶ PLAY  •  00:${String(Math.floor(elapsed)).padStart(2,'0')} / 00:42`;
+ if(badge&&badge.textContent!==badgeText)badge.textContent=badgeText;
+ const flash=$('#film-flash');if(flash){const idx=scene.index;const cue=idx%3===0?scene.observations[0]:idx%3===1?scene.observations[2]:scene.observations[3];const show=elapsed>=8&&elapsed<=25;const text=show?'✦ OBSERVED DETAIL  /  '+cue:'';
+  if(flash.textContent!==text)flash.textContent=text;
+  flash.classList.toggle('visible',show)}}
 function whoOptions(){return otherPlayers().map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('')}
 function renderCards(){const r=state.room,hand=r.private.hand,actionCards=hand.filter(x=>x.type==='action'),selected=hand.find(x=>x.id===state.selectedCard)||hand[0],pending=r.pending;
  const myPending=pending?.target===r.me;const mustAct=myTurn()&&r.phase==='TURN';
@@ -176,6 +220,7 @@ document.addEventListener('submit',e=>{const form=e.target.closest('form[data-fo
  else if(type==='accuse')submitAccuse();});
 async function init(){try{state.catalog=await api('/api/catalog');if(state.session){await fetchRoom(false);if(state.room)connectWebsocket();}
  state.chosenChapter=state.room?.case.chapter||'will';state.casePick=state.room?.case.id||'will-1';renderApp();
- setInterval(()=>{if(state.room){if(!isEditing())fetchRoom();tickFilm();}},2500);setInterval(tickFilm,1000);
+ // Poll as a WebSocket fallback. An unchanged revision never re-renders the interface.
+ setInterval(()=>{if(state.room){if(state.pendingRoomRender&&!isEditing())renderApp();fetchRoom();}},2500);setInterval(tickFilm,1000);
  }catch(e){$('#app').innerHTML='<div class="paper" style="max-width:650px;margin:50px auto"><h2>Cannot connect to game server</h2><p>'+esc(e.message)+'</p><p>Start the included server with <code>python run.py</code>.</p></div>'}}
 init();

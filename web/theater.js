@@ -3,20 +3,48 @@ const code=new URLSearchParams(location.search).get('code')?.toUpperCase();
 const root=document.getElementById('theater-root');
 const safe=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let room=null;
+let theaterSceneKey=null;
 async function update(){if(!code){root.innerHTML='<h1>No room code provided.</h1>';return}
  try{const r=await fetch(`/api/rooms/${encodeURIComponent(code)}/public`);if(!r.ok)throw Error('Room not found.');const next=await r.json();
- if(!room||room.revision!==next.revision){room=next;paint()};tick();}catch(e){root.innerHTML=`<div class="theater"><div class="paper"><h2>The theater cannot connect</h2><p>${safe(e.message)}</p></div></div>`}}
+ if(!room||room.revision!==next.revision){
+  // Individual votes, card plays and observations should NOT destroy the film player.
+  const key=`${next.case?.id}|${next.phase}|${next.scene?.index??-1}|${next.enhanced}`;
+  const layoutChanged=!room||theaterSceneKey!==key;
+  room=next;
+  if(layoutChanged){theaterSceneKey=key;paint()}else patchPublicData();
+ }
+ tick();
+ }catch(e){
+  // Keep the visible film on transient network hiccups; try again on next poll.
+  if(!room)root.innerHTML=`<div class="theater"><div class="paper"><h2>The theater cannot connect</h2><p>${safe(e.message)}</p></div></div>`;
+ }}
 const header=()=>room?.case?.title||'The Manor Files';
-function paint(){const r=room,sc=r.scene,playing=r.phase==='WATCHING';const active=r.roster.find(x=>x.id===r.active_player);
- root.innerHTML=`<div class="theater"><div><div class="flex-between" style="margin-bottom:18px"><div><div class="eyebrow">THE MANOR FILES · PUBLIC SCREEN</div><h1>${safe(header())}</h1><span class="code-label">ROOM ${safe(code)} · ${r.roster.length} DETECTIVES</span></div><div><button class="fullscreen-button" id="fullscreen">⛶ Fullscreen</button></div></div>
+const rosterMarkup=r=>r.roster.map(p=>`<div class="roster-row"><span class="avatar">${safe(p.name[0])}</span><strong>${safe(p.name)}</strong><span class="status">${p.eliminated?'Out':'Active'}</span></div>`).join('');
+const cluesMarkup=r=>r.public_clues.slice(-12).reverse().map(x=>`<div class="lead-row"><em>SCENE ${x.scene!==null?x.scene+1:'—'}</em>${safe(x.text)}</div>`).join('')||'<p>No leads recorded yet.</p>';
+const phaseInstruction=r=>r.phase==='WATCHING'?'Watch carefully':r.phase==='DISCLOSURE'?'Personal identity disclosures':r.phase==='DECISION'?'The detectives choose a lead':r.phase==='TURN'?'Investigation round':r.phase==='READY'?'Next scene ready':r.phase==='CHALLENGE'?'One last chance':r.phase==='ENDED'?'The mystery is solved':'Gather around the screen';
+const phaseDescription=r=>{const active=r.roster.find(x=>x.id===r.active_player);return r.phase==='WATCHING'?'Observe clothing, possessions and the mansion rooms.':r.phase==='DISCLOSURE'?'Each detective reveals one truthful fact about their concealed character.':r.phase==='DECISION'?'Everyone votes on whether to search archives or follow a shadow. The group decision uncovers new evidence.':r.phase==='TURN'?'Current detective: '+(active?.name||'—')+'. Play a required investigation card or draw.':r.phase==='READY'?'The host can now begin the next scene.':r.phase==='CHALLENGE'?'The first solver correctly identified all murders but missed at least one rival identity.':r.phase==='ENDED'?'Review the solutions in the private app or below.':'The host begins the investigation when all players are ready.'};
+function patchText(id,value){const node=document.getElementById(id);if(node&&node.textContent!==value)node.textContent=value;}
+function patchHtml(id,value){const node=document.getElementById(id);if(node&&node.innerHTML!==value)node.innerHTML=value;}
+function patchPublicData(){const r=room;
+ patchText('tv-instructions',phaseInstruction(r));
+ patchText('tv-instruction-copy',phaseDescription(r));
+ patchText('tv-room-label',`ROOM ${code} · ${r.roster.length} DETECTIVES`);
+ patchHtml('tv-public-clues',cluesMarkup(r));
+ patchHtml('tv-roster',rosterMarkup(r));
+ const meter=document.getElementById('tv-tension-meter');if(meter)meter.style.width=`${r.tension||0}%`;
+ patchText('tv-ballots',`${r.ballots_cast||0} ballots`);
+}
+function paint(){const r=room,sc=r.scene;
+ root.innerHTML=`<div class="theater"><div><div class="flex-between" style="margin-bottom:18px"><div><div class="eyebrow">THE MANOR FILES · PUBLIC SCREEN</div><h1>${safe(header())}</h1><span class="code-label" id="tv-room-label">ROOM ${safe(code)} · ${r.roster.length} DETECTIVES</span></div><div><button class="fullscreen-button" id="fullscreen">⛶ Fullscreen</button></div></div>
  ${sc?`<div class="film"><div class="film-view" style="background-image:linear-gradient(0deg,#0009,#0001),url('${sc.image}')"><span class="film-badge" id="tv-clock">▶ PLAY • 00:00 / 00:42</span><div class="film-story"><div class="eyebrow" style="color:#eac18b">SCENE ${sc.index+1} OF 5 · ${safe(sc.location)}</div><div class="film-line" id="tv-line">${safe(sc.lines[0])}</div></div></div><div class="film-footer"><div class="progress"><div id="tv-progress"></div></div><div class="flex-between" style="margin-top:13px"><strong>${safe(sc.title)}</strong><span class="tag">${safe(r.phase)}</span></div></div></div>`:
  `<div class="hero" style="height:530px"><div class="hero-inner"><div class="eyebrow">WAITING FOR THE HOST</div><h1>${safe(header())}</h1><p>The first scene will begin shortly.</p></div></div>`}
- <div class="panel padded" style="margin-top:18px"><div class="eyebrow">CURRENT INSTRUCTIONS</div><h3>${r.phase==='WATCHING'?'Watch carefully':r.phase==='DISCLOSURE'?'Personal identity disclosures':r.phase==='DECISION'?'The detectives choose a lead':r.phase==='TURN'?'Investigation round':r.phase==='READY'?'Next scene ready':r.phase==='CHALLENGE'?'One last chance':r.phase==='ENDED'?'The mystery is solved':'Gather around the screen'}</h3><p class="lead">${r.phase==='WATCHING'?'Observe clothing, possessions and the mansion rooms.':r.phase==='DISCLOSURE'?'Each detective reveals one truthful fact about their concealed character.':r.phase==='DECISION'?'Everyone votes on whether to search archives or follow a shadow. The group decision uncovers new evidence.':r.phase==='TURN'?'Current detective: '+safe(active?.name||'—')+'. Play a required investigation card or draw.':r.phase==='READY'?'The host can now begin the next scene.':r.phase==='CHALLENGE'?'The first solver correctly identified all murders but missed at least one rival identity.':r.phase==='ENDED'?'Review the solutions in the private app or below.':'The host begins the investigation when all players are ready.'}</p></div></div>
- <div class="theater-side"><div class="paper"><div class="theater-badge">TV MODE · NO PRIVATE CARDS</div>${r.enhanced?`<div class="director-bar"><span class="tag green">DIRECTOR’S CUT</span><div style="flex:1"><strong>Suspense</strong><div class="director-meter"><div style="width:${r.tension||0}%"></div></div></div><span>${r.ballots_cast||0} ballots</span></div>`:''}<div class="eyebrow">PUBLIC CASEBOARD</div><h2>Evidence log</h2>${r.public_clues.slice(-12).reverse().map(x=>`<div class="lead-row"><em>SCENE ${x.scene!==null?x.scene+1:'—'}</em>${safe(x.text)}</div>`).join('')||'<p>No leads recorded yet.</p>'}<div class="divider"></div><div class="eyebrow">DETECTIVES</div>${r.roster.map(p=>`<div class="roster-row"><span class="avatar">${safe(p.name[0])}</span><strong>${safe(p.name)}</strong><span class="status">${p.eliminated?'Out':'Active'}</span></div>`).join('')}
+ <div class="panel padded" style="margin-top:18px"><div class="eyebrow">CURRENT INSTRUCTIONS</div><h3 id="tv-instructions">${phaseInstruction(r)}</h3><p class="lead" id="tv-instruction-copy">${safe(phaseDescription(r))}</p></div></div>
+ <div class="theater-side"><div class="paper"><div class="theater-badge">TV MODE · NO PRIVATE CARDS</div>${r.enhanced?`<div class="director-bar"><span class="tag green">DIRECTOR’S CUT</span><div style="flex:1"><strong>Suspense</strong><div class="director-meter"><div id="tv-tension-meter" style="width:${r.tension||0}%"></div></div></div><span id="tv-ballots">${r.ballots_cast||0} ballots</span></div>`:''}<div class="eyebrow">PUBLIC CASEBOARD</div><h2>Evidence log</h2><div id="tv-public-clues">${cluesMarkup(r)}</div><div class="divider"></div><div class="eyebrow">DETECTIVES</div><div id="tv-roster">${rosterMarkup(r)}</div>
  ${r.phase==='ENDED'?`<div class="divider"></div><div class="eyebrow">TRUTH REVEALED</div>${r.solution.map((m,i)=>`<p><strong>Death ${i+1}:</strong> ${safe(m.murderer)} killed ${safe(m.victim)}, ${safe(m.room)}, ${safe(m.weapon)}.</p>`).join('')}`:''}</div></div></div>`;
  document.getElementById('fullscreen')?.addEventListener('click',()=>document.documentElement.requestFullscreen?.());}
 function tick(){if(!room?.scene)return;const elapsed=Math.max(0,Math.min(42,room.phase==='WATCHING'?Date.now()/1000-room.scene_started:42));
- const line=document.getElementById('tv-line');if(line)line.textContent=room.scene.lines[Math.min(2,Math.floor(elapsed/14))];
- const clock=document.getElementById('tv-clock');if(clock)clock.textContent=`${room.phase==='WATCHING'?'▶ PLAY':'Ⅱ STOP'} • 00:${String(Math.floor(elapsed)).padStart(2,'0')} / 00:42`;
+ const line=document.getElementById('tv-line'),lineText=room.scene.lines[Math.min(2,Math.floor(elapsed/14))];if(line&&line.textContent!==lineText)line.textContent=lineText;
+ const clock=document.getElementById('tv-clock'),clockText=`${room.phase==='WATCHING'?'▶ PLAY':'Ⅱ STOP'} • 00:${String(Math.floor(elapsed)).padStart(2,'0')} / 00:42`;
+ if(clock&&clock.textContent!==clockText)clock.textContent=clockText;
  const bar=document.getElementById('tv-progress');if(bar)bar.style.width=(elapsed/42*100)+'%';}
 update();setInterval(update,2000);setInterval(tick,500);
